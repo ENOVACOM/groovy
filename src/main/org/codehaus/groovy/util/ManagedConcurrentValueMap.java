@@ -64,8 +64,8 @@ public class ManagedConcurrentValueMap<K,V> {
         ManagedReference<V> ref = new ManagedReference<V>(bundle, value) {
             @Override
             public void finalizeReference() {
+            	internalMap.remove(key, get());
                 super.finalizeReference();
-                internalMap.remove(key, get());
             }
         };
         internalMap.put(key, ref);

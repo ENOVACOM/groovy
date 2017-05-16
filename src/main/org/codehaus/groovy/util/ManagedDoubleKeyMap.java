@@ -45,8 +45,10 @@ public class ManagedDoubleKeyMap<K1,K2,V> extends AbstractConcurrentDoubleKeyMap
             this.entry = entry;
         }
 
-        public void finalizeRef() {
+        @Override
+        public void finalizeReference() {
             this.entry.clean();
+            super.finalizeReference();
         }
     }
 
@@ -105,8 +107,8 @@ public class ManagedDoubleKeyMap<K1,K2,V> extends AbstractConcurrentDoubleKeyMap
         }
 
         public void clean() {
-            super.clean();
             value = null;
+            super.clean();
         }
     }
 }

@@ -37,6 +37,7 @@ public class ManagedLinkedList<T> {
             super(bundle, value);
         }
 
+        @Override
         public void finalizeReference() {
             if (previous != null && previous.next != null) {
                 previous.next = next;

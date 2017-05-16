@@ -28,6 +28,7 @@ import org.codehaus.groovy.ast.ModuleNode;
 import org.codehaus.groovy.classgen.Verifier;
 import org.codehaus.groovy.control.*;
 import org.codehaus.groovy.runtime.DefaultGroovyMethods;
+import org.codehaus.groovy.runtime.InvokerHelper;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 
@@ -959,6 +960,9 @@ public class GroovyClassLoader extends URLClassLoader {
      */
     public void clearCache() {
         synchronized (classCache) {
+        	for (Class cl : classCache.values()) {
+                InvokerHelper.removeClass(cl);
+        	}			
             classCache.clear();
         }
         synchronized (sourceCache) {

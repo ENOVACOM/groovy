@@ -20,13 +20,9 @@ import groovy.lang.*;
 import org.codehaus.groovy.reflection.stdclasses.*;
 import org.codehaus.groovy.util.*;
 
-import java.lang.ref.PhantomReference;
-import java.lang.ref.SoftReference;
-import java.lang.ref.WeakReference;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Handle for all information we want to keep about the class
@@ -34,8 +30,6 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @author Alex.Tkachman
  */
 public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
-
-    private static final Set<ClassInfo> modifiedExpandos = new HashSet<ClassInfo>();
 
     private final LazyCachedClassRef cachedClassRef;
     private final LazyClassLoaderRef artifactClassLoader;
@@ -49,17 +43,15 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
     MetaMethod[] dgmMetaMethods = CachedClass.EMPTY;
     MetaMethod[] newMetaMethods = CachedClass.EMPTY;
     private ManagedConcurrentMap perInstanceMetaClassMap;
-    
+
     private static ReferenceBundle softBundle = ReferenceBundle.getSoftBundle();
     private static ReferenceBundle weakBundle = ReferenceBundle.getWeakBundle();
-    private static final ClassInfoSet globalClassSet = new ClassInfoSet(softBundle);
+    
+    private static final ClassInfoSet globalClassSet = new ClassInfoSet(weakBundle);
+    private static final ManagedLinkedList<ClassInfo> modifiedExpandos = new ManagedLinkedList<ClassInfo>(weakBundle);
 
     ClassInfo(ManagedConcurrentMap.Segment segment, Class klazz, int hash) {
-        super (softBundle, segment, klazz, hash);
-
-        if (ClassInfo.DebugRef.debug)
-          new DebugRef(klazz);
-
+        super (weakBundle, segment, klazz, hash);
         this.hash = hash;
         cachedClassRef = new LazyCachedClassRef(softBundle, this);
         artifactClassLoader = new LazyClassLoaderRef(softBundle, this);
@@ -94,13 +86,11 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
     }
 
     public static ClassInfo getClassInfo (Class cls) {
-        ThreadLocalMapHandler handler = localMapRef.get();
-        SoftReference<LocalMap> ref=null;
-        if (handler!=null) ref = handler.get();
-        LocalMap map=null;
-        if (ref!=null) map = ref.get();
-        if (map!=null) return map.get(cls);
         return (ClassInfo) globalClassSet.getOrPut(cls,null);
+    }
+    
+    public static void remove(Class<?> cls) {
+    	globalClassSet.remove(cls);
     }
 
     public MetaClass getStrongMetaClass() {
@@ -109,20 +99,27 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
 
     public void setStrongMetaClass(MetaClass answer) {
         version++;
+        
+        MetaClass strongRef = strongMetaClass;
 
         if (strongMetaClass instanceof ExpandoMetaClass) {
           ((ExpandoMetaClass)strongMetaClass).inRegistry = false;
-          modifiedExpandos.remove(this);
+          for (Iterator<ClassInfo> itr = modifiedExpandos.iterator(); itr.hasNext(); ) {
+              ClassInfo info = itr.next();
+              if(info == this) {
+                  itr.remove();
+              }
+          }
         }
 
         strongMetaClass = answer;
 
-        if (strongMetaClass instanceof ExpandoMetaClass) {
+        if (answer instanceof ExpandoMetaClass) {
           ((ExpandoMetaClass)strongMetaClass).inRegistry = true;
           modifiedExpandos.add(this);
         }
 
-        weakMetaClass = null;
+        replaceWeakMetaClassRef(null);
     }
 
     public MetaClass getWeakMetaClass() {
@@ -133,12 +130,22 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
         version++;
 
         strongMetaClass = null;
-        if (answer == null) {
-           weakMetaClass = null;
-        } else {
+        ManagedReference<MetaClass> newRef = null;
+        if (answer != null) {
            weakMetaClass = new ManagedReference<MetaClass> (softBundle,answer);
         }
+        replaceWeakMetaClassRef(newRef);
     }
+    
+    private void replaceWeakMetaClassRef(ManagedReference<MetaClass> newRef) {
+        // safe value here to avoid multiple reads with possibly
+        // differing values due to concurrency
+        ManagedReference<MetaClass> weakRef = weakMetaClass;
+        if (weakRef != null) {
+            weakRef.clear();
+        }
+        weakMetaClass = newRef;
+   }
 
     public MetaClass getMetaClassForClass() {
         return strongMetaClass != null ? strongMetaClass : weakMetaClass == null ? null : weakMetaClass.get();
@@ -147,11 +154,11 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
     private MetaClass getMetaClassUnderLock() {
         MetaClass answer = getStrongMetaClass();
         if (answer!=null) return answer;
-        
+
         answer = getWeakMetaClass();
         final MetaClassRegistry metaClassRegistry = GroovySystem.getMetaClassRegistry();
         MetaClassRegistry.MetaClassCreationHandle mccHandle = metaClassRegistry.getMetaClassCreationHandler();
-        
+
         if (answer != null) {
             boolean enableGloballyOn = (mccHandle instanceof ExpandoMetaClassCreationHandle);
             boolean cachedAnswerIsEMC = (answer instanceof ExpandoMetaClass);
@@ -206,12 +213,13 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
         return globalClassSet.fullSize();
     }
 
-    public void finalizeRef() {
+    @Override
+    public void finalizeReference() {
         setStrongMetaClass(null);
         cachedClassRef.clear();
         artifactClassLoader.clear();
 
-        super.finalizeRef();
+        super.finalizeReference();
     }
 
     private static CachedClass createCachedClass(Class klazz, ClassInfo classInfo) {
@@ -233,7 +241,7 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
                 cachedClass = new BigDecimalCachedClass(klazz, classInfo);
             } else if (klazz == Long.class || klazz == Long.TYPE) {
                 cachedClass = new LongCachedClass(klazz, classInfo, klazz==Long.class);
-            } else if (klazz == Float.class || klazz == Float.TYPE) { 
+            } else if (klazz == Float.class || klazz == Float.TYPE) {
                 cachedClass = new FloatCachedClass(klazz, classInfo, klazz==Float.class);
             } else if (klazz == Short.class || klazz == Short.TYPE) {
                 cachedClass = new ShortCachedClass(klazz, classInfo, klazz==Short.class);
@@ -284,7 +292,7 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
 
         if (metaClass != null) {
             if (perInstanceMetaClassMap == null)
-              perInstanceMetaClassMap = new ManagedConcurrentMap(ReferenceBundle.getWeakBundle()); 
+              perInstanceMetaClassMap = new ManagedConcurrentMap(ReferenceBundle.getWeakBundle());
 
             perInstanceMetaClassMap.put(obj, metaClass);
         }
@@ -322,97 +330,6 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
         }
     }
 
-    private static final class LocalMap extends HashMap<Class,ClassInfo> {
-
-        private static final int CACHE_SIZE = 5;
-
-        // We use a PhantomReference or a WeakReference for the Thread
-        // because the ThreadLocal manages a map with the thread as key.
-        // If we make a strong reference to the thread here, then it is 
-        // possible, that the map cannot be cleaned. If the number of 
-        // threads is not limited, then this map may consume too much memory
-        // This reference here is unmanaged (queue==null) because if the map 
-        // key gets collected, the reference will too. 
-        private final PhantomReference<Thread> myThread = new PhantomReference(Thread.currentThread(),null);
-
-        private int nextCacheEntry;
-
-        private final ClassInfo[] cache = new ClassInfo[CACHE_SIZE];
-        private static final ClassInfo NOINFO = new ClassInfo(null,null,0);
-
-        private LocalMap() {
-            for (int i = 0; i < cache.length; i++) {
-                cache[i] = NOINFO;
-            }
-        }
-
-        public ClassInfo get(Class key) {
-            ClassInfo info = getFromCache(key);
-            if (info != null)
-              return info;
-
-            info = super.get(key);
-            if (info != null)
-              return putToCache(info);
-
-            return putToCache((ClassInfo) globalClassSet.getOrPut(key,null));
-        }
-
-        private ClassInfo getFromCache (Class klazz) {
-            for (int i = 0, k = nextCacheEntry-1; i < cache.length; i++, k--) {
-                if (k < 0)
-                  k += CACHE_SIZE;
-
-                final ClassInfo info = cache[k];
-                if (klazz == info.get()) {
-                    nextCacheEntry = k+1;
-                    if (nextCacheEntry == CACHE_SIZE)
-                      nextCacheEntry = 0;
-                    return info;
-                }
-            }
-            return null;
-        }
-
-        private ClassInfo putToCache (ClassInfo classInfo) {
-            cache [nextCacheEntry++] = classInfo;
-            if (nextCacheEntry == CACHE_SIZE)
-              nextCacheEntry = 0;
-            return classInfo;
-        }
-    }
-
-    private static class ThreadLocalMapHandler extends ThreadLocal<SoftReference<LocalMap>> {
-        SoftReference<LocalMap> recentThreadMapRef;
-        
-        protected SoftReference<LocalMap> initialValue() {
-            return new SoftReference(new LocalMap(),null);
-        }
-
-        public SoftReference<LocalMap> get() {
-            SoftReference<LocalMap> mapRef = recentThreadMapRef;
-            LocalMap recent = null;
-            if (mapRef!=null) recent = mapRef.get();
-            // we don't need to handle myThread.get()==null, because in that
-            // case the thread has been collected, meaning the entry for the
-            // thread is invalid anyway, so it is valid if recent has a 
-            // different value. 
-            if (recent != null && recent.myThread.get() == Thread.currentThread()) {
-                return mapRef;
-            } else {
-                SoftReference<LocalMap> ref = super.get();
-                recentThreadMapRef = ref;
-                return ref;
-            }
-        }
-    }
-    
-    private static final WeakReference<ThreadLocalMapHandler> localMapRef;
-    static {
-        ThreadLocalMapHandler localMap = new ThreadLocalMapHandler();
-        localMapRef = new WeakReference<ThreadLocalMapHandler>(localMap,null);
-    }
-
     private static class LazyCachedClassRef extends LazyReference<CachedClass> {
         private final ClassInfo info;
 
@@ -436,25 +353,6 @@ public class ClassInfo extends ManagedConcurrentMap.Entry<Class,ClassInfo> {
 
         public ClassLoaderForClassArtifacts initValue() {
             return new ClassLoaderForClassArtifacts(info.get());
-        }
-    }
-
-    private static class DebugRef extends ManagedReference<Class> {
-        public static final boolean debug = false;
-
-        private static final AtomicInteger count = new AtomicInteger();
-
-        final String name;
-
-        public DebugRef(Class klazz) {
-            super(softBundle, klazz);
-            name = klazz == null ? "<null>" : klazz.getName();
-            count.incrementAndGet();
-        }
-
-        public void finalizeRef() {
-            System.out.println(name + " unloaded " + count.decrementAndGet() + " classes kept");
-            super.finalizeReference();
         }
     }
 }
